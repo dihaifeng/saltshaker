@@ -1,0 +1,184 @@
+2016年5月18日
+
+saltshaker 环境搭建 
+github：https://github.com/yueyongyue/saltshaker
+
+部署环境
+系统版本:Centos6.6 (理论上centos6.x都应该可以)
+python版本:2.7.x,测试环境中使用的是2.7.11,注意一定要升级到2.7.x,不支持python2.6.x
+
+
+1、配置pip
+    首先确保系统python版本为2.7.x 
+    python --version
+    输出如下
+    Python 2.7.x
+    
+    需要安装python开发工具包,否则安装mysql-python报错
+    yum install -y python-devel
+    
+    安装setuptools
+    wget https://bootstrap.pypa.io/ez_setup.py -O - | python
+    
+    安装成功后安装pip
+    easy_install pip
+    
+    检查
+    pip --version
+    输出类似如下，路径可能有所不同，但一定是python2.7
+    pip 8.1.2 from /usr/local/python2.7.11/lib/python2.7/site-packages/pip-8.1.2-py2.7.egg (python 2.7)
+
+2、安装saltstack
+
+    yum install -y epel-release
+    yum install -y salt-master salt-minion salt-api salt-syndic
+    
+3、为了不影响其他程序运行,我们使用virtualenv运行程序
+
+    pip install virtualenv
+    mkdir /data/www/saltshaker && cd /data/www/saltshaker
+    virtualenv --no-site-packages venv
+    source source venv/bin/activate
+    注意现在命令提示符变成(venv) 开头表示处于虚拟环境中,从现在开始以下所有步骤都在这个环境中执行
+    (如果要退出这个环境，执行deactivate)
+    
+3、安装cherrypy
+
+     pip install cherrypy==3.8.0
+
+4、配置api
+
+    使用系统pam进行认证,添加系统用户和密码
+     useradd -M -s /sbin/nologin saltadmin
+     passwd saltadmin
+
+     用户名:saltadmin
+     密码:123456
+
+     添加saltapi.conf 文件
+     vim /etc/salt/master.d/saltapi.conf
+     rest_cherrypy:
+       port: 8000
+       host: 127.0.0.1
+       disable_ssl: true
+     external_auth:
+       pam:
+         saltadmin:
+           - .*
+           - '@runner'
+           - '@wheel'
+  
+    /etc/init.d/salt-master restart
+    /etc/init.d/salt-api restart
+    lsof -ni:8000  看到8000端口监听在127.0.0.1上就可以了
+
+5、安装及配置Django 和 Django crontab
+
+    pip install Django==1.8.4
+    pip install django-crontab
+    pip install mysql-python
+    #以上命令如果报错，请检查是否安装了python-devel(rpm -qa|grep -i python-devel)
+    mkdir -pv /var/log/saltshaker/
+
+6、下载程序
+    git clone https://github.com/yueyongyue/saltshaker.git
+    cd saltshaker/saltshaker/
+    #第一个saltshaker是主目录,包含mange.py文件，第二个saltshaker是配置文件目录，包含主配置文件settings.py
+    vim settings.py       配置数据库和salt api 认证信息
+    DATABASES = {
+               'default': {
+                   'ENGINE': 'django.db.backends.mysql', # Add 'postgresql_psycopg2', 'mysql', 'sqlite3' or 'oracle'.
+                   'NAME': 'saltshaker', # Or path to database file if using sqlite3.
+                   'USER': 'saltshaker_user', # Not used with sqlite3.
+                   'PASSWORD': 'passwd', # Not used with sqlite3.
+                   'HOST': 'localhost', # Set to empty string for localhost. Not used with sqlite3.
+                   'PORT': '3306', # Set to empty string for default. Not used with sqlite3.
+        }
+    }
+    其中数据库信息请根据实际情况填写,第七步中会创建数据库
+    根据添加的系统用户信息,在settings.py 行尾添加如下信息,进行salt api 的认证配置
+
+    # SaltStack API
+    SALT_API_URL = 'http://127.0.0.1:8000'
+    SALT_API_USER = 'saltadmin'
+    SALT_API_PASSWD = '123456'
+
+7、安装mysql或者使用现有的mysql数据库
+    mysql -p登陆数据库执行
+    create database saltshaker;
+    use saltshaker;
+    source saltshaker-init.sql.txt;
+    #saltshaker-init.sql.txt文件可以在saltshaker主目录找到
+    grant all privileges on saltshaker.* to saltshaker_user@'%' identified by 'passwd'
+    #创建服务使用的数据库用户也就是第六步配置文件中使用的用户
+
+8、异步请求 Celery
+
+    安装 django-celery (3.1.17)
+        pip install django-celery==3.1.17
+    安装 celery
+        pip install celery==3.1.17
+    安装 rbbitmq
+        yum install -y rabbitmq-server
+    开启rabbitmq-management plugin管理插件
+        /usr/lib/rabbitmq/bin/rabbitmq-plugins enable rabbitmq_management
+        
+         rabbitmqctl stop
+        /etc/init.d/rabbitmq-server start
+    此时可以访问 127.0.0.1:15672
+    用户名:guest
+    密码:guest
+
+    vim settings.py       配置celery和rabbitmq,如果按照默认安装的话下面一段都是不用修改的
+
+    # celery + rabbitmq
+
+    platforms.C_FORCE_ROOT = True   # Running a worker with superuser privileges
+    djcelery.setup_loader()
+    BROKER_HOST = "127.0.0.1"
+    BROKER_PORT = 5672
+    BROKER_USER = "guest"
+    BROKER_PASSWORD = "guest"
+    BROKER_VHOST = "/"
+
+9、 启动celery worker
+    我们使用screen运行程序，或者也可以扔到后台运行
+    screen -S celery
+    cd 主目录
+    python manage.py celery worker --loglevel=info
+    ctrl+a d退出screen
+
+10、 启动计划任务
+
+    python manage.py crontab add              添加计划任务用于获取queue队列数
+
+11、 启动服务
+    我们使用screen运行程序，或者也可以扔到后台运行
+    screen -S saltshaker
+    python manage.py runserver 0.0.0.0:8090
+    ctrl+a d退出screen
+    使用浏览器打开 http://127.0.0.1:8090
+    初始用户名：admin
+    初始密码：admin
+
+12、配置nginx
+    创建一个server文件如下
+
+    upstream django {
+    server 127.0.0.1:8090; # for a web port socket (we'll use this first)
+    }
+
+    server {
+        listen      80;
+        server_name salt-test.xxxxx.com; # substitute your machine's IP address or FQDN
+        charset     utf-8;
+
+        client_max_body_size 75M;   # adjust to taste
+        include proxy.conf;
+
+        location / {
+            proxy_pass  http://django;
+        }
+    }
+13、访问
+    配置host,然后访问http://salt-test.xxxxx.com即可
